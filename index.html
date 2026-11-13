@@ -47,6 +47,8 @@ progress{width:100%;height:10px;margin-top:12px}
   <button id="load">Download AI and start</button>
   <progress id="bar" max="100" value="0" hidden></progress>
   <p id="msg" class="dim"></p>
+  <p><button class="ghost" id="check">Run check (then send me the result)</button></p>
+  <pre id="diag" class="dim" style="white-space:pre-wrap"></pre>
   <p><button class="ghost" id="lite">Play now without AI (simple opponent)</button></p>
 </section>
 
@@ -117,6 +119,15 @@ $("load").onclick = async () => {
   }
 };
 
+$("check").onclick = async () => {
+  const L = [], out = () => { $("diag").textContent = L.join("\n"); };
+  L.push("WebGPU: " + (navigator.gpu ? "yes" : "NO")); out();
+  try{ const a = navigator.gpu && await navigator.gpu.requestAdapter(); L.push("GPU adapter: " + (a ? "ok" : "none")); }catch(e){ L.push("GPU adapter error: " + e.message); } out();
+  try{ const e = await navigator.storage.estimate(); L.push("Storage free: " + Math.round((e.quota-e.usage)/1e6) + " MB"); }catch{ L.push("Storage: unknown"); } out();
+  L.push("IndexedDB: " + (window.indexedDB ? "yes" : "NO") + ", Cache API: " + (window.caches ? "yes" : "NO")); out();
+  try{ await fetch("https://huggingface.co/",{mode:"no-cors"}); L.push("Model host reachable: yes"); }catch{ L.push("Model host reachable: NO"); } out();
+  L.push("Browser: " + navigator.userAgent); out();
+};
 $("lite").onclick = () => { level = LEVELS.easy; engine = null; $("s-start").hidden = true; newMatch(); };
 const LITE = [k=>"You keep saying “"+k+"”, but where’s your proof?",k=>"Nice try. “"+k+"” doesn’t settle anything.",k=>"If “"+k+"” were enough, the other side would collapse. It doesn’t.",k=>"I’ll give you “"+k+"”, and I still win on the facts.",k=>"That’s a feeling, not an argument. Give me a reason."];
 function liteReply(t){ const w=(t.toLowerCase().match(/[a-z]{5,}/g)||["that"]).sort((a,b)=>b.length-a.length)[0]; return LITE[Math.floor(Math.random()*LITE.length)](w); }
