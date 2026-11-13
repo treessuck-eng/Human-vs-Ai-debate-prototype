@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RD2Win</title>
+<style>
+:root{--bg:#14110f;--card:#1f1a17;--ink:#f4ede4;--dim:#a89c8f;--hot:#ffb000;--ok:#6fd08c;--bad:#ff6b5e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.5 Georgia,"Times New Roman",serif;padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom)}
+main{max-width:620px;margin:0 auto;padding:24px 0 48px}
+h1{font:900 44px/1 "Arial Black",Impact,sans-serif;letter-spacing:-1px;margin:0 0 4px}
+h1 i{color:var(--hot);font-style:normal}
+.sub{color:var(--dim);margin:0 0 24px}
+section{background:var(--card);border-radius:14px;padding:18px;margin-bottom:16px}
+button,select,textarea{font:inherit;color:inherit}
+button{background:var(--hot);color:#1a1200;border:0;border-radius:10px;padding:12px 18px;font-weight:700;cursor:pointer}
+button:disabled{opacity:.4}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--dim)}
+select,textarea{width:100%;background:#120f0d;border:1px solid #3a322c;border-radius:10px;padding:10px}
+textarea{min-height:90px;resize:vertical}
+progress{width:100%;height:10px;margin-top:12px}
+.dim{color:var(--dim);font-size:15px}
+.topic{font:700 24px/1.25 "Arial Black",sans-serif;margin:4px 0 6px}
+.clock{font:900 30px "Arial Black",sans-serif;font-variant-numeric:tabular-nums}
+.row{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.msg{padding:10px 12px;border-radius:10px;margin:8px 0;background:#120f0d}
+.msg.you{border-left:3px solid var(--hot)}
+.msg.ai{border-left:3px solid var(--dim)}
+.big{font:900 36px "Arial Black",sans-serif;margin:0}
+.win{color:var(--ok)}.lose{color:var(--bad)}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+<h1>RD2<i>Win</i></h1>
+<p class="sub">Out-argue the AI. 60 seconds on your clock.</p>
+
+<section id="s-start">
+  <label class="dim" for="level">AI strength</label>
+  <select id="level">
+    <option value="easy">Easy (smaller download, about 0.4 GB)</option>
+    <option value="normal">Normal (about 1 GB)</option>
+  </select>
+  <p class="dim">The AI runs on your own device. The first time, it downloads once. Wi-Fi recommended.</p>
+  <button id="load">Download AI and start</button>
+  <progress id="bar" max="100" value="0" hidden></progress>
+  <p id="msg" class="dim"></p>
+</section>
+
+<section id="s-game" hidden>
+  <div class="row"><div><div class="dim" id="side"></div><div class="topic" id="topic"></div></div><div class="clock" id="clock">60.0</div></div>
+  <div id="log"></div>
+  <textarea id="input" placeholder="Type or dictate your argument (keyboard mic works)"></textarea>
+  <p></p>
+  <div class="row"><button id="send">Send</button><button class="ghost" id="done">Finish match</button></div>
+  <p class="dim" id="status"></p>
+</section>
+
+<section id="s-end" hidden>
+  <p class="big" id="verdict"></p>
+  <p class="dim" id="rating"></p>
+  <div id="detail"></div>
+  <p></p>
+  <div class="row"><button id="again">Play again</button><button class="ghost" id="copy">Copy result</button></div>
+</section>
+</main>
+
+<script type="module">
+import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+
+const $ = id => document.getElementById(id);
+const TOPICS = ["Pineapple belongs on pizza","Cats are better pets than dogs","Homework should be banned","A hot dog is a sandwich","Social media does more harm than good","Breakfast is the best meal of the day","Summer is better than winter","Video games are a real sport","Everyone should learn to cook","School should start at 10am","Working from home beats the office","Money can buy happiness","Cereal is a soup","Zoos should be closed","Tipping should be abolished","Books are better than movies","Phones should be banned in schools","Mornings are better than nights","Reality TV does real harm","Self-driving cars should replace drivers","Everyone should have to learn a second language","Fast food should be taxed","Libraries are still worth funding","Pro athletes are paid too much"];
+const LEVELS = {
+  easy:{ids:["Qwen2.5-0.5B-Instruct-q4f16_1-MLC","Llama-3.2-1B-Instruct-q4f16_1-MLC"],elo:900},
+  normal:{ids:["Qwen2.5-1.5B-Instruct-q4f16_1-MLC","Llama-3.2-1B-Instruct-q4f16_1-MLC"],elo:1100}
+};
+const MAX_TURNS = 6;
+const store = {
+  get(k,d){try{const v=localStorage.getItem(k);return v===null?d:JSON.parse(v)}catch{return d}},
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}}
+};
+
+let engine = null, level = null, g = null, busy = false, timer = null;
+
+function pickModel(lv){
+  const list = webllm.prebuiltAppConfig.model_list;
+  for(const id of lv.ids){ if(list.some(m=>m.model_id===id)) return id; }
+  return [...list].sort((a,b)=>(a.vram_required_MB||1e9)-(b.vram_required_MB||1e9))[0].model_id;
+}
+
+async function ask(messages,max=60,temp=0.8){
+  const r = await engine.chat.completions.create({messages,max_tokens:max,temperature:temp});
+  return (r.choices[0].message.content||"").trim();
+}
+
+$("load").onclick = async () => {
+  if(!navigator.gpu){ $("msg").textContent = "This browser doesn’t support WebGPU yet. Update Safari or Chrome and try again."; return; }
+  level = LEVELS[$("level").value];
+  $("load").disabled = true; $("bar").hidden = false;
+  try{
+    engine = await webllm.CreateMLCEngine(pickModel(level),{initProgressCallback:r=>{$("msg").textContent=r.text;$("bar").value=(r.progress||0)*100}});
+    $("s-start").hidden = true;
+    newMatch();
+  }catch(e){
+    $("msg").textContent = "Couldn’t load the AI: " + e.message;
+    $("load").disabled = false;
+  }
+};
+
+function newMatch(){
+  let seen = store.get("rd2w_seen",[]);
+  let pool = TOPICS.filter(t=>!seen.includes(t));
+  if(!pool.length){ seen = []; pool = TOPICS; }
+  const topic = pool[Math.floor(Math.random()*pool.length)];
+  store.set("rd2w_seen",[...seen,topic]);
+  const side = Math.random()<.5 ? "for" : "against";
+  g = {topic,side,hist:[],left:60000,over:false};
+  busy = false;
+  $("topic").textContent = topic;
+  $("side").textContent = "You argue " + side;
+  $("log").innerHTML = ""; $("input").value = "";
+  $("s-end").hidden = true; $("s-game").hidden = false;
+  $("status").textContent = "Your clock runs while you write. It pauses while the AI answers.";
+  clearInterval(timer);
+  let last = performance.now();
+  timer = setInterval(()=>{
+    const now = performance.now();
+    if(!busy && !g.over){ g.left -= now-last; if(g.left<=0){ g.left=0; send(true); } }
+    last = now;
+    $("clock").textContent = (g.left/1000).toFixed(1);
+  },100);
+}
+
+function add(who,text){
+  g.hist.push({who,text});
+  const d = document.createElement("div");
+  d.className = "msg " + who;
+  d.textContent = (who==="you"?"You: ":"AI: ") + text;
+  $("log").appendChild(d);
+}
+
+async function send(auto){
+  if(busy||g.over) return;
+  const t = $("input").value.trim();
+  if(!t){ if(auto) finish(); return; }
+  busy = true; $("input").value = "";
+  add("you",t);
+  const youCount = g.hist.filter(h=>h.who==="you").length;
+  if(auto || youCount>=MAX_TURNS){ return finish(); }
+  $("status").textContent = "AI is thinking…";
+  const aiSide = g.side==="for" ? "AGAINST" : "FOR";
+  const sys = "You are a sharp, witty debate opponent. Topic: “" + g.topic + "”. You argue " + aiSide + " it. Reply in 1 or 2 short sentences (max 40 words). Rebut the other person’s last point directly. No lists, no preamble.";
+  try{
+    const reply = await ask([{role:"system",content:sys},...g.hist.map(h=>({role:h.who==="you"?"user":"assistant",content:h.text}))],80,0.8);
+    add("ai",reply||"Interesting. Prove it.");
+  }catch(e){ add("ai","(The AI stumbled. Keep going.)"); }
+  $("status").textContent = "";
+  busy = false;
+}
+$("send").onclick = () => send(false);
+$("done").onclick = () => { if(g && !g.over){ busy = true; const t=$("input").value.trim(); if(t) add("you",t); $("input").value=""; finish(); } };
+
+const QS = [
+  ["Does the argument give a concrete reason or example, not just an opinion?",4],
+  ["Does the argument directly respond to what the other side just said?",3],
+  ["Is the argument clearly about the topic?",2]
+];
+
+async function yes(topic,prev,text,q){
+  const out = await ask([
+    {role:"system",content:"You are a strict debate checker. Answer with only YES or NO."},
+    {role:"user",content:"Topic: "+topic+"\nOther side said: "+(prev||"(nothing yet)")+"\nArgument: "+text+"\nQuestion: "+q}
+  ],3,0);
+  return /^\W*yes/i.test(out);
+}
+
+function overlap(a,b){
+  const A = new Set(a.toLowerCase().match(/\w+/g)||[]), B = new Set(b.toLowerCase().match(/\w+/g)||[]);
+  if(!A.size||!B.size) return 0;
+  let n = 0; A.forEach(w=>{ if(B.has(w)) n++; });
+  return n/Math.min(A.size,B.size);
+}
+
+async function scoreMsg(i){
+  const h = g.hist[i];
+  const prev = i>0 ? g.hist[i-1].text : null;
+  let s = 0;
+  for(let k=0;k<QS.length;k++){
+    if(k===1 && !prev){ s += QS[k][1]; continue; }
+    try{ if(await yes(g.topic,prev,h.text,QS[k][0])) s += QS[k][1]; }catch{}
+  }
+  const words = (h.text.match(/\w+/g)||[]).length;
+  if(words>=10 && words<=70) s += 1;
+  const earlier = g.hist.slice(0,i).filter(x=>x.who===h.who);
+  if(earlier.some(x=>overlap(h.text,x.text)>0.6)) s -= 2;
+  return Math.max(0,Math.min(10,s));
+}
+
+async function finish(){
+  g.over = true; clearInterval(timer);
+  $("s-game").hidden = true; $("s-end").hidden = false;
+  $("verdict").textContent = "Judging…"; $("rating").textContent = ""; $("detail").innerHTML = "";
+  const totals = {you:0,ai:0};
+  for(let i=0;i<g.hist.length;i++){
+    const sc = await scoreMsg(i);
+    g.hist[i].score = sc; totals[g.hist[i].who] += sc;
+    const d = document.createElement("div");
+    d.className = "msg " + g.hist[i].who;
+    d.textContent = (g.hist[i].who==="you"?"You":"AI") + " (" + sc + "/10): " + g.hist[i].text;
+    $("detail").appendChild(d);
+  }
+  const diff = totals.you - totals.ai;
+  const S = diff>=3 ? 1 : diff<=-3 ? 0 : .5;
+  const me = store.get("rd2w_elo",1000);
+  const exp = 1/(1+Math.pow(10,(level.elo-me)/400));
+  const now = Math.round(me + 32*(S-exp));
+  store.set("rd2w_elo",now);
+  const word = S===1?"You win":S===0?"AI wins":"Draw";
+  $("verdict").textContent = word + ": " + totals.you + " to " + totals.ai;
+  $("verdict").className = "big " + (S===1?"win":S===0?"lose":"");
+  $("rating").textContent = "Rating " + me + " → " + now + " (" + (now-me>=0?"+":"") + (now-me) + "). Saved on this device only.";
+  g.result = word + " " + totals.you + "-" + totals.ai + " on “" + g.topic + "” (rating " + now + ") #RD2Win";
+}
+$("again").onclick = newMatch;
+$("copy").onclick = () => { try{ navigator.clipboard.writeText(g.result); $("copy").textContent = "Copied"; }catch{} };
+</script>
+</body>
+</html>
