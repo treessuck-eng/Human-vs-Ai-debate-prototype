@@ -47,6 +47,7 @@ progress{width:100%;height:10px;margin-top:12px}
   <button id="load">Download AI and start</button>
   <progress id="bar" max="100" value="0" hidden></progress>
   <p id="msg" class="dim"></p>
+  <p><button class="ghost" id="lite">Play now without AI (simple opponent)</button></p>
 </section>
 
 <section id="s-game" hidden>
@@ -99,15 +100,27 @@ $("load").onclick = async () => {
   if(!navigator.gpu){ $("msg").textContent = "This browser doesn’t support WebGPU yet. Update Safari or Chrome and try again."; return; }
   level = LEVELS[$("level").value];
   $("load").disabled = true; $("bar").hidden = false;
+  const t0 = Date.now(); let lastP = -1, lastT = t0;
+  const watch = setInterval(()=>{ if(Date.now()-lastT>60000) $("msg").textContent = "No progress for a minute. Check your connection, or tap “Play now without AI”."; },5000);
   try{
-    engine = await webllm.CreateMLCEngine(pickModel(level),{initProgressCallback:r=>{$("msg").textContent=r.text;$("bar").value=(r.progress||0)*100}});
+    engine = await webllm.CreateMLCEngine(pickModel(level),{
+      appConfig:{...webllm.prebuiltAppConfig,useIndexedDBCache:true},
+      initProgressCallback:r=>{ const p=Math.round((r.progress||0)*100); if(p!==lastP){lastP=p;lastT=Date.now();} $("bar").value=p; $("msg").textContent=p+"% · "+Math.round((Date.now()-t0)/1000)+"s · "+r.text; }
+    });
+    clearInterval(watch);
     $("s-start").hidden = true;
     newMatch();
   }catch(e){
+    clearInterval(watch);
     $("msg").textContent = "Couldn’t load the AI: " + e.message;
     $("load").disabled = false;
   }
 };
+
+$("lite").onclick = () => { level = LEVELS.easy; engine = null; $("s-start").hidden = true; newMatch(); };
+const LITE = [k=>"You keep saying “"+k+"”, but where’s your proof?",k=>"Nice try. “"+k+"” doesn’t settle anything.",k=>"If “"+k+"” were enough, the other side would collapse. It doesn’t.",k=>"I’ll give you “"+k+"”, and I still win on the facts.",k=>"That’s a feeling, not an argument. Give me a reason."];
+function liteReply(t){ const w=(t.toLowerCase().match(/[a-z]{5,}/g)||["that"]).sort((a,b)=>b.length-a.length)[0]; return LITE[Math.floor(Math.random()*LITE.length)](w); }
+function liteYes(topic,prev,text,k){ if(k===0) return /because|since|for example|for instance|therefore|so that|\d/i.test(text); if(k===1) return overlap(text,prev||"")>.15; return overlap(text,topic)>0 || (text.match(/\w+/g)||[]).length>=8; }
 
 function newMatch(){
   let seen = store.get("rd2w_seen",[]);
@@ -122,7 +135,7 @@ function newMatch(){
   $("side").textContent = "You argue " + side;
   $("log").innerHTML = ""; $("input").value = "";
   $("s-end").hidden = true; $("s-game").hidden = false;
-  $("status").textContent = "Your clock runs while you write. It pauses while the AI answers.";
+  $("status").textContent = engine ? "Your clock runs while you write. It pauses while the AI answers." : "Lite mode: simple opponent, no AI download.";
   clearInterval(timer);
   let last = performance.now();
   timer = setInterval(()=>{
@@ -153,7 +166,7 @@ async function send(auto){
   const aiSide = g.side==="for" ? "AGAINST" : "FOR";
   const sys = "You are a sharp, witty debate opponent. Topic: “" + g.topic + "”. You argue " + aiSide + " it. Reply in 1 or 2 short sentences (max 40 words). Rebut the other person’s last point directly. No lists, no preamble.";
   try{
-    const reply = await ask([{role:"system",content:sys},...g.hist.map(h=>({role:h.who==="you"?"user":"assistant",content:h.text}))],80,0.8);
+    const reply = !engine ? liteReply(t) : await ask([{role:"system",content:sys},...g.hist.map(h=>({role:h.who==="you"?"user":"assistant",content:h.text}))],80,0.8);
     add("ai",reply||"Interesting. Prove it.");
   }catch(e){ add("ai","(The AI stumbled. Keep going.)"); }
   $("status").textContent = "";
@@ -189,7 +202,7 @@ async function scoreMsg(i){
   let s = 0;
   for(let k=0;k<QS.length;k++){
     if(k===1 && !prev){ s += QS[k][1]; continue; }
-    try{ if(await yes(g.topic,prev,h.text,QS[k][0])) s += QS[k][1]; }catch{}
+    try{ if(engine ? await yes(g.topic,prev,h.text,QS[k][0]) : liteYes(g.topic,prev,h.text,k)) s += QS[k][1]; }catch{}
   }
   const words = (h.text.match(/\w+/g)||[]).length;
   if(words>=10 && words<=70) s += 1;
